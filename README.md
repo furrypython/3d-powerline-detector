@@ -23,7 +23,10 @@ We use **Principal Component Analysis (PCA)** on the local neighborhood of every
    - $\lambda_2$ and $\lambda_3$ represent the spread in the orthogonal directions (the thickness).
    - If the points form a thin line (like a powerline), $\lambda_1$ will be much larger than $\lambda_2$.
    - We calculate Linearity: $L = (\lambda_1 - \lambda_2) / \lambda_1$.
-   - If $L$ is close to `1.0` (e.g., $> 0.85$), we classify the point as part of a powerline.
+   - If $L$ is close to `1.0` (e.g., $> 0.85$), we classify the point as part of a line.
+4. **Thickness Filtering:**
+   - Because $\lambda_2$ represents the variance across the width of the line, we can estimate the physical radius of the tube as $2 \times \sqrt{\lambda_2}$.
+   - We reject any lines where this estimated radius exceeds our `--max-thickness` (e.g., rejecting thick tree trunks while keeping thin wires).
 
 ## Usage
 
@@ -34,13 +37,14 @@ We use **Principal Component Analysis (PCA)** on the local neighborhood of every
 
 2. **Run the detector:**
    ```bash
-   python detect_powerlines.py input.las output.las --radius 0.05 --threshold 0.85
+   python detect_powerlines.py input.las output.las --radius 0.1 --threshold 0.85 --max-thickness 0.04
    ```
 
 ### Parameters
 
-- `--radius`: The search radius in meters. If your powerlines are 5.0 - 30.0 mm in radius, a search radius of `0.05` (50mm) to `0.1` (100mm) is a good starting point to capture the local cylindrical structure and account for LiDAR noise.
+- `--radius`: The search radius in meters. This defines the "neighborhood" size to look at when determining shape. It should be comfortably *larger* than your target object. For a 30mm radius powerline, `0.1` (100mm) is a good starting point.
 - `--threshold`: The strictness of the line detection (0.0 to 1.0). `0.85` is a good default. Increase it to `0.9` or `0.95` if you are getting too much noise (like tree branches), or decrease it to `0.7` if parts of the powerline are missing.
+- `--max-thickness`: The maximum allowed physical thickness (radius) of the detected line in meters. Since powerlines are 5-30mm, `0.04` (40mm) is a good default to filter out thicker cylindrical objects (like tree trunks or thick pipes) while allowing for slight LiDAR noise.
 
 ## Next Steps for Improvement
 
