@@ -4,7 +4,7 @@ import numpy as np
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
-def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, max_thickness: float = 0.04):
+def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, planarity_threshold: float = 0.2, max_thickness: float = 0.04):
     """
     Detects powerlines in a LAS file using PCA (Principal Component Analysis).
     
@@ -15,6 +15,8 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
                        For a 5-30mm radius powerline, 0.05m (50mm) is a good starting point.
         linearity_threshold: Threshold for the linearity metric (0.0 to 1.0).
                              Higher means stricter line detection.
+        planarity_threshold: Maximum allowed planarity metric (0.0 to 1.0).
+                             Lower means stricter rejection of flat surfaces (like building edges).
         max_thickness: Maximum allowed thickness (radius) of the line in meters.
                        Points belonging to structures thicker than this will be rejected.
     """
@@ -71,13 +73,18 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
                 # If lambda_1 is much larger than lambda_2, it's a line.
                 linearity = (eigenvalues[0] - eigenvalues[1]) / eigenvalues[0]
                 
+                # Planarity metric: (lambda_2 - lambda_3) / lambda_1
+                # If lambda_2 is much larger than lambda_3, it's a flat surface (like a building edge).
+                # For a cylindrical wire, lambda_2 and lambda_3 should be roughly equal, making planarity close to 0.
+                planarity = (eigenvalues[1] - eigenvalues[2]) / eigenvalues[0]
+                
                 # Estimate the thickness (radius) of the structure
                 # eigenvalues[1] is the variance along the secondary axis.
                 # Standard deviation (approximate radius) is the square root of the variance.
                 # We multiply by 2 to get a rough estimate of the full radius capturing most points (2 sigma).
                 estimated_radius = 2 * np.sqrt(eigenvalues[1])
                 
-                if linearity > linearity_threshold and estimated_radius <= max_thickness:
+                if linearity > linearity_threshold and planarity < planarity_threshold and estimated_radius <= max_thickness:
                     is_line[start_idx + i] = True
 
     # Filter the original LAS data
@@ -102,8 +109,10 @@ if __name__ == "__main__":
                         help="Search radius in meters (default: 0.05). Should be slightly larger than the powerline radius.")
     parser.add_argument("--threshold", type=float, default=0.85, 
                         help="Linearity threshold 0.0-1.0 (default: 0.85). Higher is stricter.")
+    parser.add_argument("--planarity-threshold", type=float, default=0.2, 
+                        help="Maximum allowed planarity 0.0-1.0 (default: 0.2). Filters out flat building edges.")
     parser.add_argument("--max-thickness", type=float, default=0.04, 
                         help="Maximum allowed thickness (radius) of the line in meters (default: 0.04m).")
     
     args = parser.parse_args()
-    detect_powerlines(args.input, args.output, args.radius, args.threshold, args.max_thickness)
+    detect_powerlines(args.input, args.output, args.radius, args.threshold, args.planarity_threshold, args.max_thickness)
