@@ -4,10 +4,10 @@ import numpy as np
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
-def estimate_ground_elevation(points: np.ndarray, block_size: float = 10.0) -> np.ndarray:
+def estimate_ground_elevation(points: np.ndarray, block_size: float = 5.0, percentile: float = 5.0) -> np.ndarray:
     """
-    Estimates the ground elevation for each point by finding the lowest point 
-    in each 2D block and interpolating.
+    Estimates the ground elevation for each point by finding the lowest points 
+    in each 2D block (using a percentile to ignore noise) and interpolating.
     """
     x = points[:, 0]
     y = points[:, 1]
@@ -21,11 +21,17 @@ def estimate_ground_elevation(points: np.ndarray, block_size: float = 10.0) -> n
     max_y_blocks = np.max(y_blocks) + 1
     block_indices = x_blocks * max_y_blocks + y_blocks
     
-    unique_blocks, inverse_indices = np.unique(block_indices, return_inverse=True)
+    # Sort points by Z to easily find percentiles
+    sort_idx = np.argsort(z)
+    sorted_z = z[sort_idx]
+    sorted_blocks = block_indices[sort_idx]
     
-    # Find min Z for each block
-    min_z_per_block = np.full(len(unique_blocks), np.inf)
-    np.minimum.at(min_z_per_block, inverse_indices, z)
+    unique_blocks, first_indices = np.unique(sorted_blocks, return_index=True)
+    _, block_counts = np.unique(sorted_blocks, return_counts=True)
+    
+    # Use the Nth percentile for each block to avoid negative noise points
+    percentile_indices = first_indices + (block_counts * (percentile / 100.0)).astype(int)
+    ground_z_per_block = sorted_z[percentile_indices]
     
     # Get the x, y coordinates of the center of each block
     unique_x_blocks = unique_blocks // max_y_blocks
@@ -40,7 +46,7 @@ def estimate_ground_elevation(points: np.ndarray, block_size: float = 10.0) -> n
     
     # For each point, find the nearest block centers and interpolate
     points_2d = points[:, :2]
-    k = min(3, len(unique_blocks))
+    k = min(5, len(unique_blocks)) # Increased k to 5 for smoother interpolation
     
     if k == 0:
         return np.zeros(len(points))
@@ -49,14 +55,14 @@ def estimate_ground_elevation(points: np.ndarray, block_size: float = 10.0) -> n
     
     if k == 1:
         if len(unique_blocks) == 1:
-            ground_z = np.full(len(points), min_z_per_block[0])
+            ground_z = np.full(len(points), ground_z_per_block[0])
         else:
-            ground_z = min_z_per_block[indices]
+            ground_z = ground_z_per_block[indices]
     else:
         distances = np.maximum(distances, 1e-6)
         weights = 1.0 / (distances ** 2)
         weights /= np.sum(weights, axis=1, keepdims=True)
-        ground_z = np.sum(weights * min_z_per_block[indices], axis=1)
+        ground_z = np.sum(weights * ground_z_per_block[indices], axis=1)
         
     return ground_z
 
