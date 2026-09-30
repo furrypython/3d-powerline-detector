@@ -4,7 +4,63 @@ import numpy as np
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
-def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, planarity_threshold: float = 0.2, max_thickness: float = 0.04):
+def estimate_ground_elevation(points: np.ndarray, block_size: float = 10.0) -> np.ndarray:
+    """
+    Estimates the ground elevation for each point by finding the lowest point 
+    in each 2D block and interpolating.
+    """
+    x = points[:, 0]
+    y = points[:, 1]
+    z = points[:, 2]
+    
+    # Discretize into blocks
+    min_x, min_y = np.min(x), np.min(y)
+    x_blocks = np.floor((x - min_x) / block_size).astype(int)
+    y_blocks = np.floor((y - min_y) / block_size).astype(int)
+    
+    max_y_blocks = np.max(y_blocks) + 1
+    block_indices = x_blocks * max_y_blocks + y_blocks
+    
+    unique_blocks, inverse_indices = np.unique(block_indices, return_inverse=True)
+    
+    # Find min Z for each block
+    min_z_per_block = np.full(len(unique_blocks), np.inf)
+    np.minimum.at(min_z_per_block, inverse_indices, z)
+    
+    # Get the x, y coordinates of the center of each block
+    unique_x_blocks = unique_blocks // max_y_blocks
+    unique_y_blocks = unique_blocks % max_y_blocks
+    
+    block_centers_x = min_x + (unique_x_blocks + 0.5) * block_size
+    block_centers_y = min_y + (unique_y_blocks + 0.5) * block_size
+    block_centers = np.vstack((block_centers_x, block_centers_y)).T
+    
+    # Build a 2D KDTree of the block centers
+    ground_tree = KDTree(block_centers)
+    
+    # For each point, find the nearest block centers and interpolate
+    points_2d = points[:, :2]
+    k = min(3, len(unique_blocks))
+    
+    if k == 0:
+        return np.zeros(len(points))
+        
+    distances, indices = ground_tree.query(points_2d, k=k)
+    
+    if k == 1:
+        if len(unique_blocks) == 1:
+            ground_z = np.full(len(points), min_z_per_block[0])
+        else:
+            ground_z = min_z_per_block[indices]
+    else:
+        distances = np.maximum(distances, 1e-6)
+        weights = 1.0 / (distances ** 2)
+        weights /= np.sum(weights, axis=1, keepdims=True)
+        ground_z = np.sum(weights * min_z_per_block[indices], axis=1)
+        
+    return ground_z
+
+def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, planarity_threshold: float = 0.2, max_thickness: float = 0.04, min_height: float = 4.5):
     """
     Detects powerlines in a LAS file using PCA (Principal Component Analysis).
     
@@ -28,10 +84,14 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
     num_points = len(points)
     print(f"Loaded {num_points} points.")
     
+    print("Estimating ground elevation...")
+    ground_z = estimate_ground_elevation(points)
+    height_above_ground = points[:, 2] - ground_z
+    
     print("Building KDTree for fast neighborhood search...")
     tree = KDTree(points)
     
-    print(f"Computing PCA for each point (search radius: {search_radius}m)...")
+    print(f"Computing PCA for each point (search radius: {search_radius}m, min height: {min_height}m)...")
     is_line = np.zeros(num_points, dtype=bool)
     
     # Process in chunks to avoid massive memory usage if we queried all at once
@@ -40,10 +100,20 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
     for start_idx in tqdm(range(0, num_points, chunk_size), desc="Processing points"):
         end_idx = min(start_idx + chunk_size, num_points)
         chunk_points = points[start_idx:end_idx]
+        chunk_heights = height_above_ground[start_idx:end_idx]
+        
+        # Only query neighbors for points that are high enough
+        valid_mask = chunk_heights >= min_height
+        valid_indices = np.where(valid_mask)[0]
+        
+        if len(valid_indices) == 0:
+            continue
+            
+        valid_chunk_points = chunk_points[valid_indices]
         
         # Find neighbors within the search radius
         # query_ball_point returns a list of lists containing neighbor indices
-        neighbors_list = tree.query_ball_point(chunk_points, r=search_radius)
+        neighbors_list = tree.query_ball_point(valid_chunk_points, r=search_radius)
         
         for i, neighbors in enumerate(neighbors_list):
             if len(neighbors) < 5:
@@ -85,7 +155,8 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
                 estimated_radius = 2 * np.sqrt(eigenvalues[1])
                 
                 if linearity > linearity_threshold and planarity < planarity_threshold and estimated_radius <= max_thickness:
-                    is_line[start_idx + i] = True
+                    original_idx = start_idx + valid_indices[i]
+                    is_line[original_idx] = True
 
     # Filter the original LAS data
     detected_count = np.sum(is_line)
@@ -113,6 +184,8 @@ if __name__ == "__main__":
                         help="Maximum allowed planarity 0.0-1.0 (default: 0.2). Filters out flat building edges.")
     parser.add_argument("--max-thickness", type=float, default=0.04, 
                         help="Maximum allowed thickness (radius) of the line in meters (default: 0.04m).")
+    parser.add_argument("--min-height", type=float, default=4.5, 
+                        help="Minimum height above ground in meters (default: 4.5m).")
     
     args = parser.parse_args()
-    detect_powerlines(args.input, args.output, args.radius, args.threshold, args.planarity_threshold, args.max_thickness)
+    detect_powerlines(args.input, args.output, args.radius, args.threshold, args.planarity_threshold, args.max_thickness, args.min_height)
