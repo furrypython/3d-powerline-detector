@@ -4,66 +4,81 @@ import numpy as np
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
-def estimate_ground_elevation(points: np.ndarray, block_size: float = 5.0, percentile: float = 5.0) -> np.ndarray:
+from scipy.ndimage import grey_opening, distance_transform_edt, median_filter
+from scipy.interpolate import RegularGridInterpolator
+
+def estimate_ground_elevation(points: np.ndarray, cell_size: float = 1.0, window_size: float = 15.0, percentile: float = 5.0) -> np.ndarray:
     """
-    Estimates the ground elevation for each point by finding the lowest points 
-    in each 2D block (using a percentile to ignore noise) and interpolating.
+    Estimates the ground elevation using a Simple Morphological Filter (SMRF) approach.
+    1. Creates a minimum elevation grid (using a percentile to ignore negative noise).
+    2. Inpaints empty cells using nearest neighbor (distance transform).
+    3. Applies morphological opening to remove non-ground objects (buildings, trees).
+    4. Interpolates the bare-earth surface back to the original points.
     """
     x = points[:, 0]
     y = points[:, 1]
     z = points[:, 2]
     
-    # Discretize into blocks
-    min_x, min_y = np.min(x), np.min(y)
-    x_blocks = np.floor((x - min_x) / block_size).astype(int)
-    y_blocks = np.floor((y - min_y) / block_size).astype(int)
+    # 1. Discretize into a grid
+    min_x, max_x = np.min(x), np.max(x)
+    min_y, max_y = np.min(y), np.max(y)
     
-    max_y_blocks = np.max(y_blocks) + 1
-    block_indices = x_blocks * max_y_blocks + y_blocks
+    cols = int(np.ceil((max_x - min_x) / cell_size)) + 1
+    rows = int(np.ceil((max_y - min_y) / cell_size)) + 1
+    
+    c = np.floor((x - min_x) / cell_size).astype(int)
+    r = np.floor((y - min_y) / cell_size).astype(int)
+    
+    # Combine r and c into a single flat index for grouping
+    flat_indices = r * cols + c
     
     # Sort points by Z to easily find percentiles
     sort_idx = np.argsort(z)
     sorted_z = z[sort_idx]
-    sorted_blocks = block_indices[sort_idx]
+    sorted_flat = flat_indices[sort_idx]
     
-    unique_blocks, first_indices = np.unique(sorted_blocks, return_index=True)
-    _, block_counts = np.unique(sorted_blocks, return_counts=True)
+    unique_flat, first_indices = np.unique(sorted_flat, return_index=True)
+    _, block_counts = np.unique(sorted_flat, return_counts=True)
     
-    # Use the Nth percentile for each block to avoid negative noise points
+    # Use the Nth percentile for each cell to avoid negative noise points
     percentile_indices = first_indices + (block_counts * (percentile / 100.0)).astype(int)
-    ground_z_per_block = sorted_z[percentile_indices]
+    cell_z = sorted_z[percentile_indices]
     
-    # Get the x, y coordinates of the center of each block
-    unique_x_blocks = unique_blocks // max_y_blocks
-    unique_y_blocks = unique_blocks % max_y_blocks
+    # Map back to 2D grid
+    unique_r = unique_flat // cols
+    unique_c = unique_flat % cols
     
-    block_centers_x = min_x + (unique_x_blocks + 0.5) * block_size
-    block_centers_y = min_y + (unique_y_blocks + 0.5) * block_size
-    block_centers = np.vstack((block_centers_x, block_centers_y)).T
+    max_z = np.max(z)
+    min_grid = np.full((rows, cols), max_z + 10.0)
+    min_grid[unique_r, unique_c] = cell_z
     
-    # Build a 2D KDTree of the block centers
-    ground_tree = KDTree(block_centers)
-    
-    # For each point, find the nearest block centers and interpolate
-    points_2d = points[:, :2]
-    k = min(5, len(unique_blocks)) # Increased k to 5 for smoother interpolation
-    
-    if k == 0:
+    # 2. Inpaint empty cells
+    empty_mask = min_grid > max_z
+    if np.all(empty_mask):
         return np.zeros(len(points))
         
-    distances, indices = ground_tree.query(points_2d, k=k)
-    
-    if k == 1:
-        if len(unique_blocks) == 1:
-            ground_z = np.full(len(points), ground_z_per_block[0])
-        else:
-            ground_z = ground_z_per_block[indices]
-    else:
-        distances = np.maximum(distances, 1e-6)
-        weights = 1.0 / (distances ** 2)
-        weights /= np.sum(weights, axis=1, keepdims=True)
-        ground_z = np.sum(weights * ground_z_per_block[indices], axis=1)
+    if np.any(empty_mask):
+        indices = distance_transform_edt(empty_mask, return_distances=False, return_indices=True)
+        min_grid = min_grid[tuple(indices)]
         
+    # Apply a small median filter to remove isolated negative noise spikes
+    min_grid = median_filter(min_grid, size=3)
+        
+    # 3. Morphological Opening
+    # Convert window size from meters to pixels/cells
+    size = int(np.ceil(window_size / cell_size))
+    if size > 1:
+        bare_earth_grid = grey_opening(min_grid, size=(size, size))
+    else:
+        bare_earth_grid = min_grid
+        
+    # 4. Interpolate back to points
+    grid_y = min_y + np.arange(rows) * cell_size + cell_size / 2
+    grid_x = min_x + np.arange(cols) * cell_size + cell_size / 2
+    
+    interpolator = RegularGridInterpolator((grid_y, grid_x), bare_earth_grid, bounds_error=False, fill_value=None)
+    ground_z = interpolator(np.vstack((y, x)).T)
+    
     return ground_z
 
 def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, planarity_threshold: float = 0.2, max_thickness: float = 0.04, min_height: float = 4.5):
