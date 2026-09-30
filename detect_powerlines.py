@@ -4,7 +4,7 @@ import numpy as np
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
-def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, planarity_threshold: float = 0.2, max_thickness: float = 0.04):
+def detect_powerlines(input_path: str, output_path: str, search_radius: float = 0.05, linearity_threshold: float = 0.85, planarity_threshold: float = 0.2, max_thickness: float = 0.04, max_vertical_angle: float = 45.0):
     """
     Detects powerlines in a LAS file using PCA (Principal Component Analysis).
     
@@ -19,6 +19,8 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
                              Lower means stricter rejection of flat surfaces (like building edges).
         max_thickness: Maximum allowed thickness (radius) of the line in meters.
                        Points belonging to structures thicker than this will be rejected.
+        max_vertical_angle: Maximum allowed angle from the horizontal plane in degrees.
+                            Used to filter out vertical structures like poles.
     """
     print(f"Loading {input_path}...")
     las = laspy.read(input_path)
@@ -33,6 +35,10 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
     
     print(f"Computing PCA for each point (search radius: {search_radius}m)...")
     is_line = np.zeros(num_points, dtype=bool)
+    
+    # Convert max_vertical_angle to max allowed Z component
+    # z_component = sin(angle_from_horizontal)
+    max_z_component = np.sin(np.radians(max_vertical_angle))
     
     # Process in chunks to avoid massive memory usage if we queried all at once
     chunk_size = 100000
@@ -60,12 +66,14 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
             # Compute covariance matrix
             cov_matrix = np.dot(centered.T, centered) / (len(neighbors) - 1)
             
-            # Compute eigenvalues
+            # Compute eigenvalues and eigenvectors
             # eigh is optimized for symmetric matrices like covariance matrices
-            eigenvalues = np.linalg.eigvalsh(cov_matrix)
+            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
             
-            # Sort eigenvalues in descending order
-            eigenvalues = np.sort(eigenvalues)[::-1]
+            # Sort eigenvalues in descending order and sort eigenvectors accordingly
+            sort_indices = np.argsort(eigenvalues)[::-1]
+            eigenvalues = eigenvalues[sort_indices]
+            eigenvectors = eigenvectors[:, sort_indices]
             
             # Avoid division by zero
             if eigenvalues[0] > 1e-6:
@@ -85,7 +93,13 @@ def detect_powerlines(input_path: str, output_path: str, search_radius: float = 
                 estimated_radius = 2 * np.sqrt(eigenvalues[1])
                 
                 if linearity > linearity_threshold and planarity < planarity_threshold and estimated_radius <= max_thickness:
-                    is_line[start_idx + i] = True
+                    # Check the direction of the primary eigenvector (direction of the line)
+                    primary_vector = eigenvectors[:, 0]
+                    # The Z component of the normalized primary vector is the sine of the angle with the horizontal plane
+                    z_component = abs(primary_vector[2])
+                    
+                    if z_component <= max_z_component:
+                        is_line[start_idx + i] = True
 
     # Filter the original LAS data
     detected_count = np.sum(is_line)
@@ -113,6 +127,8 @@ if __name__ == "__main__":
                         help="Maximum allowed planarity 0.0-1.0 (default: 0.2). Filters out flat building edges.")
     parser.add_argument("--max-thickness", type=float, default=0.04, 
                         help="Maximum allowed thickness (radius) of the line in meters (default: 0.04m).")
+    parser.add_argument("--max-vertical-angle", type=float, default=45.0, 
+                        help="Maximum allowed angle from the horizontal plane in degrees (default: 45.0). Filters out vertical poles.")
     
     args = parser.parse_args()
-    detect_powerlines(args.input, args.output, args.radius, args.threshold, args.planarity_threshold, args.max_thickness)
+    detect_powerlines(args.input, args.output, args.radius, args.threshold, args.planarity_threshold, args.max_thickness, args.max_vertical_angle)
